@@ -1,169 +1,241 @@
-"""Snapshot orchestration tests: skill extraction, occupation tiers, reframe, normalization.
+"""Synthetic regression cases; no real resumes, database or models."""
 
-Repos and models are faked so this runs without a DB or torch. Tier 1 (TF-IDF/ESCO) is
-logged only; Tier 2 (embedding over roles) is the response source.
-"""
+from types import SimpleNamespace as Row
+from unittest.mock import AsyncMock
+
 import numpy as np
 import pytest
 
 from app.config import Settings
-from app.repositories import caregiving as caregiving_repo
-from app.repositories import roles as roles_repo
-from app.repositories import skills as skills_repo
+from app.repositories import caregiving, roles, skills
 from app.repositories.caregiving import ReframedRow
-from app.repositories.roles import NearestRole, Role
-from app.repositories.skills import SkillMatch, SkillRow
+from app.repositories.roles import NearestRole
 from app.schemas.cv import CV, Experience
 from app.schemas.snapshot import Break, SnapshotRequest
 from app.services.occupation_matcher import OccupationMatch
+from app.services.skill_catalog import SkillCatalog
 from app.services.snapshot import SnapshotService
 
 pytestmark = pytest.mark.asyncio
 
-SKILL_ROWS = [
-    SkillRow("s_pm", "Project management", "soft"),
-    SkillRow("s_budget", "Budgeting", "soft"),
-    SkillRow("s_ux", "User research", "technical"),
-]
 
-# (skill_id, term) pairs: canonical names + aliases, as load_alias_dictionary returns
-ALIAS_PAIRS = [
-    ("s_pm", "Project management"),
-    ("s_pm", "project coordination"),
-    ("s_budget", "Budgeting"),
-    ("s_budget", "budget management"),
-    ("s_ux", "User research"),
-    ("s_ux", "ux research"),
-]
-
-
-class FakeEmbedder:
-    def encode(self, texts):
-        return np.zeros((len(texts), 384), dtype="float32")
-
+class Embedder:
     def encode_one(self, text):
-        return np.zeros(384, dtype="float32")
+        return np.ones(384)
 
 
-class FakeMatcher:
-    """Records what Tier 1 was called with; return value is only logged."""
-
-    def __init__(self):
+class Matcher:
+    def __init__(self, score=0.9, method="tfidf_logreg"):
         self.calls = []
+        self.score = score
+        self.method = method
 
-    def predict(self, job_title, skills, work_length_years=None, top_k=3):
-        self.calls.append({"job_title": job_title, "skills": skills})
-        return [OccupationMatch("1234.1", "Some ESCO Role", "1234", 0.9, "tfidf_logreg")]
+    def predict(self, **kwargs):
+        self.calls.append(kwargs)
+        return [OccupationMatch("1330.5", "ICT Manager", "1330", self.score, self.method)]
 
 
 @pytest.fixture(autouse=True)
-def patch_repos(monkeypatch):
-    async def _list_skills(session):
-        return SKILL_ROWS
-
-    async def _load_alias_dictionary(session):
-        return ALIAS_PAIRS
-
-    async def _match_by_embedding(session, vec, k, threshold):
-        return [SkillMatch("s_ux", "User research", 0.72)]
-
-    async def _reframe(session, activities):
-        rows = []
-        for a in activities:
-            rows.append(ReframedRow(a, "Coordination"))
-            rows.append(ReframedRow(a, "Coordination"))  # duplicate -> dedupe target
-        return rows
-
-    async def _nearest(session, vec, k):
-        return [
-            NearestRole("r1", "Project Coordinator", 0.91),
-            NearestRole("r2", "Operations Executive", 0.77),
-            NearestRole("r3", "Admin Executive", 0.66),
-            NearestRole("r4", "HR Coordinator", 0.60),
-        ]
-
-    async def _get_by_esco(session, code):
-        # the FakeMatcher's esco_code resolves to a role
-        return Role("r_mkt", "Marketing Manager", "1234") if code == "1234.1" else None
-
-    async def _get_by_masco(session, code):
-        return Role("r_mkt", "Marketing Manager", "1234") if code == "1234" else None
-
-    monkeypatch.setattr(skills_repo, "list_skills", _list_skills)
-    monkeypatch.setattr(skills_repo, "load_alias_dictionary", _load_alias_dictionary)
-    monkeypatch.setattr(skills_repo, "match_by_embedding", _match_by_embedding)
-    monkeypatch.setattr(caregiving_repo, "reframe", _reframe)
-    monkeypatch.setattr(roles_repo, "nearest_by_embedding", _nearest)
-    monkeypatch.setattr(roles_repo, "get_by_esco_code", _get_by_esco)
-    monkeypatch.setattr(roles_repo, "get_by_masco_code", _get_by_masco)
-
-
-def _request(title="Project Coordinator") -> SnapshotRequest:
-    cv = CV(
-        raw_text="Led project management and budgeting for teams.",
-        experiences=[Experience(title=title, description="Led project management.")],
-        skill_mentions=["budgeting"],
+def repos(monkeypatch):
+    catalog = [
+        Row(skill_id="s1", canonical_name="Project Management", alias="project coordination"),
+        Row(skill_id="s2", canonical_name="Budgeting", alias="budget management"),
+        Row(skill_id="s3", canonical_name="User Research", alias=None),
+        Row(skill_id="s4", canonical_name="Direct Inward Dialing", alias="did"),
+    ]
+    monkeypatch.setattr(skills, "load_catalog", AsyncMock(return_value=catalog))
+    monkeypatch.setattr(roles, "exact_eligible_title", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        roles,
+        "nearest_by_embedding",
+        AsyncMock(
+            return_value=[
+                NearestRole("M151122", "IT Project Manager", 0.81, "151122", "1330.7"),
+                NearestRole("M251116", "Technical Specialist (.Net)", 0.72, "251116", "2512.4"),
+                NearestRole("M251201", "Software Developer", 0.62, "251201", "2512.4"),
+            ]
+        ),
     )
-    return SnapshotRequest(cv=cv, break_=Break(duration_years=3, activities=["Ran the household"]))
+    monkeypatch.setattr(
+        caregiving,
+        "reframe",
+        AsyncMock(
+            return_value=[
+                ReframedRow("A1", "Household Coordination", "s1", "Project Management"),
+                ReframedRow("A2", "Daily Coordination", "s1", "Project Management"),
+            ]
+        ),
+    )
 
 
-async def test_skills_and_embedding_response():
-    svc = SnapshotService(Settings(), embedder=FakeEmbedder(), tfidf_matcher=None)
-    resp = await svc.generate(_request(), session=object())
-
-    names = {p.skill for p in resp.professional_skills}
-    assert "Project management" in names  # exact alias hit in raw_text
-    assert "Budgeting" in names           # from skill_mentions
-    assert "User research" in names       # semantic pass
-    assert resp.previous_occupation.method == "embedding"
-    assert resp.previous_occupation.role == "Project Coordinator"
-    roles = [r.role for r in resp.recommended_roles]
-    assert roles == ["Project Coordinator", "Operations Executive", "Admin Executive"]
-    assert resp.recommended_roles[0].similarity == 1.0
+def request(title="Software Engineer", text="Led project management and budgeting."):
+    return SnapshotRequest(
+        cv=CV(
+            raw_text=text, experiences=[Experience(title=title)], skill_mentions=["User Research"]
+        ),
+        break_=Break(duration_years=2, activities=["A1", "A2"]),
+    )
 
 
-async def test_tier1_masco_code_maps_to_role():
-    # FakeMatcher returns masco "1234" -> resolves to a role in the role table
-    matcher = FakeMatcher()
-    svc = SnapshotService(Settings(), embedder=FakeEmbedder(), tfidf_matcher=matcher)
-    resp = await svc.generate(_request(), session=object())
-
-    assert matcher.calls, "Tier 1 matcher should be invoked"
-    assert resp.previous_occupation.role == "Marketing Manager"  # from MASCO lookup, not embedding
-    assert resp.previous_occupation.method == "classifier"
-    assert resp.recommended_roles[0].role == "Marketing Manager"
-    assert resp.recommended_roles[0].similarity == 1.0
-    # only one MASCO match resolved -> topped up to 3 with nearest roles by embedding
-    assert len(resp.recommended_roles) == 3
-    assert resp.recommended_roles[1].role == "Project Coordinator"
+async def test_literal_evidence_only_no_fuzzy_or_semantic_invention():
+    response = await SnapshotService(Settings(), Embedder(), None).generate(request(), object())
+    assert {p.skill for p in response.professional_skills} == {"Project Management", "Budgeting"}
+    assert all(
+        p.evidence_type == "literal" and p.evidence in request().cv.raw_text
+        for p in response.professional_skills
+    )
+    assert len(response.recommended_roles) == 2  # no weak third filler
+    assert response.recommended_roles[0].similarity == 0.81  # not fabricated 1.0
+    assert response.recommended_roles[0].role_id == "M151122"
 
 
-async def test_falls_back_to_embedding_when_masco_unresolved():
-    # matcher returns a masco code that does not resolve -> Tier 2 embedding
-    class NoMatchMatcher:
-        def predict(self, job_title, skills, work_length_years=None, top_k=3):
-            return [OccupationMatch("9999.1", "Unknown", "9999", 0.5, "tfidf_retrieval")]
-
-    svc = SnapshotService(Settings(), embedder=FakeEmbedder(), tfidf_matcher=NoMatchMatcher())
-    resp = await svc.generate(_request(), session=object())
-
-    assert resp.previous_occupation.role == "Project Coordinator"
-    assert resp.previous_occupation.method == "embedding"
-
-
-async def test_normalization_reaches_tier1():
-    matcher = FakeMatcher()
-    svc = SnapshotService(Settings(), embedder=FakeEmbedder(), tfidf_matcher=matcher)
-    await svc.generate(_request(title="HR Manager"), session=object())
-
-    # "HR Manager" is alias-normalized before Tier 1 sees it
-    assert matcher.calls[0]["job_title"] == "human resources manager"
+async def test_esco_comparison_does_not_become_arbitrary_masco_history(monkeypatch):
+    lookup = AsyncMock(side_effect=AssertionError("ESCO must not select a MASCO role"))
+    monkeypatch.setattr(roles, "list_by_esco_code", lookup)
+    matcher = Matcher()
+    response = await SnapshotService(Settings(), Embedder(), matcher).generate(request(), object())
+    assert response.previous_occupation.role == "Software Engineer"
+    assert response.previous_occupation.method == "cv_title"
+    assert response.previous_occupation.confidence is None
+    assert response.previous_occupation.esco_code == "1330.5"
+    assert response.previous_occupation.comparison_score == 0.9
+    assert all(r.role != "Village Community Center Manager" for r in response.recommended_roles)
+    assert matcher.calls[0]["job_title"] == "software developer"
+    lookup.assert_not_awaited()
 
 
-async def test_reframe_dedupes():
-    svc = SnapshotService(Settings(), embedder=None, tfidf_matcher=None)
-    resp = await svc.generate(_request(), session=object())
-    assert len(resp.reframed_skills) == 1
-    assert resp.reframed_skills[0].skill == "Coordination"
-    # no embedder -> no occupation match
-    assert resp.previous_occupation is None
+@pytest.mark.parametrize(
+    "score,method",
+    [(0.64, "tfidf_logreg"), (0.74, "tfidf_retrieval"), (float("nan"), "tfidf_logreg")],
+)
+async def test_low_confidence_comparison_rejected(score, method):
+    response = await SnapshotService(Settings(), None, Matcher(score, method)).generate(
+        request(), object()
+    )
+    assert response.previous_occupation.esco_code is None
+    assert response.previous_occupation.role == "Software Engineer"
+
+
+async def test_missing_or_placeholder_title_is_not_replaced_by_target_role():
+    response = await SnapshotService(Settings(), Embedder(), Matcher()).generate(
+        request(title="Company Name City, State"), object()
+    )
+    assert response.previous_occupation is None
+
+
+async def test_older_job_cannot_override_recent_cv_title():
+    req = request(title="English Teacher")
+    req.cv.experiences.append(Experience(title="Software Engineer"))
+    matcher = Matcher()
+    response = await SnapshotService(Settings(), Embedder(), matcher).generate(req, object())
+    assert response.previous_occupation.role == "English Teacher"
+    assert len(matcher.calls) == 1
+
+
+async def test_exact_eligible_match_without_model(monkeypatch):
+    monkeypatch.setattr(
+        roles,
+        "exact_eligible_title",
+        AsyncMock(
+            return_value=[NearestRole("M251201", "Software Developer", 1, "251201", "2512.4")]
+        ),
+    )
+    response = await SnapshotService(Settings(), None, None).generate(
+        request("Software Developer"), object()
+    )
+    assert response.recommended_roles[0].method == "exact_title"
+    assert response.recommended_roles[0].esco_code == "2512.4"
+
+
+async def test_recommendation_dedupes_identity_not_shared_esco(monkeypatch):
+    monkeypatch.setattr(
+        roles,
+        "nearest_by_embedding",
+        AsyncMock(
+            return_value=[
+                NearestRole("M1", "Role One", 0.91, "251201", "2512.4"),
+                NearestRole("M1", "Role One", 0.91, "251201", "2512.4"),
+                NearestRole("M2", "Role Two", 0.89, "251116", "2512.4"),
+                NearestRole("R1", "Legacy Role", 0.99, "2512", "2512.4"),
+                NearestRole("M3", " role one ", 0.88, "251202", "2512.9"),
+            ]
+        ),
+    )
+    response = await SnapshotService(Settings(), Embedder(), None).generate(request(), object())
+    assert [r.role_id for r in response.recommended_roles] == ["M1", "M2"]
+
+
+async def test_reframe_has_canonical_id_and_deduplicates_shared_skills():
+    response = await SnapshotService(Settings(), None, None).generate(request(), object())
+    assert len(response.reframed_skills) == 1
+    assert response.reframed_skills[0].skill_id == "s1"
+    assert response.reframed_skills[0].skill == "Project Management"
+    assert response.reframed_skills[0].reframed_label == "Household Coordination"
+
+
+async def test_empty_profile_returns_no_recommendations():
+    req = request(title="", text="")
+    response = await SnapshotService(Settings(), Embedder(), Matcher()).generate(req, object())
+    assert response.previous_occupation is None
+    assert response.recommended_roles == []
+    assert "no_literal_skill_evidence" in response.warnings
+    roles.nearest_by_embedding.assert_not_awaited()
+
+
+async def test_expired_cache_refreshes_names_and_removes_old_aliases(monkeypatch):
+    loader = AsyncMock(
+        side_effect=[
+            [Row(skill_id="s1", canonical_name="Programming", alias="old alias")],
+            [Row(skill_id="s1", canonical_name="Programming (DigComp Competence)", alias=None)],
+        ]
+    )
+    monkeypatch.setattr(skills, "load_catalog", loader)
+    cache = SkillCatalog(ttl_seconds=0)
+    first = await cache.get(object())
+    second = await cache.get(object())
+    assert first.canonical["s1"] == "Programming"
+    assert second.canonical["s1"] == "Programming (DigComp Competence)"
+    assert "old alias" not in second.terms
+
+
+async def test_unexpired_shared_cache_loads_once():
+    cache = SkillCatalog(ttl_seconds=60)
+    assert await cache.get(object()) is await cache.get(object())
+    skills.load_catalog.assert_awaited_once()
+
+
+async def test_ambiguous_alias_never_uses_first_row(monkeypatch):
+    monkeypatch.setattr(
+        skills,
+        "load_catalog",
+        AsyncMock(
+            return_value=[
+                Row(skill_id="s1", canonical_name="Programming (O*NET Skill)", alias="programming"),
+                Row(
+                    skill_id="s2",
+                    canonical_name="Programming (DigComp Competence)",
+                    alias="programming",
+                ),
+            ]
+        ),
+    )
+    cache = await SkillCatalog().get(object())
+    assert "programming" not in cache.terms
+    assert len(cache.canonical) == 2
+
+
+async def test_common_verb_did_is_not_telephony():
+    response = await SnapshotService(Settings(), None, None).generate(
+        request(text="I did project management."), object()
+    )
+    assert [p.skill_id for p in response.professional_skills] == ["s1"]
+
+
+async def test_failed_refresh_does_not_serve_expired_claims(monkeypatch):
+    cache = SkillCatalog(ttl_seconds=0)
+    await cache.get(object())
+    monkeypatch.setattr(
+        skills, "load_catalog", AsyncMock(side_effect=RuntimeError("database offline"))
+    )
+    with pytest.raises(RuntimeError):
+        await cache.get(object())

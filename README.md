@@ -2,6 +2,14 @@
 
 FastAPI backend for the ReRouteHer Iteration 1 guest journey: CV parse, skill snapshot, and readiness/gap.
 
+## Backend safeguard test branch
+
+This branch proposes six-digit MASCO eligibility, honest missing-data scoring,
+literal skill evidence, stable IDs and privacy-safe request logging. **No database
+schema/data changes or deployment are included.** It has API behavior changes.
+Read [the review and testing guide](docs/BACKEND_TEST_BRANCH.md) before trying it;
+the older bootstrap database below lacks the required approved D13 metadata.
+
 This is a Monash FIT5120 academic project. See `plan.md` for the full design derived from the user stories and data-governance deliverables.
 
 ## Endpoints (It1)
@@ -64,9 +72,9 @@ pytest
 
 All three It1 endpoints are implemented and unit-tested:
 
-- **`/api/cv/parse`** - PyMuPDF column-aware text, regex + spaCy experience segmentation, rapidfuzz skill matching, PII redaction, no-OCR unreadable path.
-- **`/api/snapshot/generate`** - hybrid skill extraction (exact alias + semantic embedding), two-tier occupation cascade (classifier -> embedding fallback), recommended roles (previous pinned first + 2 nearest by kNN), break reframing.
-- **`/api/gap/compute`** - two-band readiness %, per-gap uplift, merged top-3 focus list.
+- **`/api/cv/parse`** - column-aware text, conservative dated employment extraction, literal skill mentions, best-effort email/phone redaction, no OCR.
+- **`/api/snapshot/generate`** - literal canonical/alias evidence, CV-stated occupation with separate ESCO comparison, 0–3 eligible six-digit MASCO recommendations, canonical break skill IDs.
+- **`/api/gap/compute`** - exact-ID requirement coverage, explicit not-assessed responses, true requirement counts and top-three focus gaps.
 
 The app boots even when models are absent (embedder/classifier optional) so the frontend can integrate against the schemas. `pytest` runs the fast suite without a DB or torch (repos/models faked for the snapshot); the real DB + model path is exercised by running the container.
 

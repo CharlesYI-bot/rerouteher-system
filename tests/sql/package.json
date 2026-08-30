@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "description": "Optional in-memory PostgreSQL/pgvector regression harness; not a runtime dependency",
+  "dependencies": {
+    "@electric-sql/pglite": "0.5.8",
+    "@electric-sql/pglite-pgvector": "0.0.9"
+  }
+}

@@ -1,4 +1,5 @@
 """Skill taxonomy queries: alias lookup and pgvector semantic match."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -22,12 +23,26 @@ class SkillRow:
     skill_type: str
 
 
+async def load_catalog(session: AsyncSession):
+    return (
+        await session.execute(
+            text(
+                "SELECT st.skill_id, st.canonical_name, sa.alias FROM skill_taxonomy st "
+                "LEFT JOIN skill_aliases sa ON sa.skill_id = st.skill_id "
+                "ORDER BY st.skill_id, sa.alias"
+            )
+        )
+    ).all()
+
+
 async def list_skills(session: AsyncSession) -> list[SkillRow]:
     """Canonical skill rows for building a skill_id -> canonical lookup."""
     rows = (
-        await session.execute(text("SELECT skill_id, canonical_name, skill_type FROM skill_taxonomy"))
+        await session.execute(
+            text("SELECT skill_id, canonical_name, skill_type FROM skill_taxonomy")
+        )
     ).all()
-    return [SkillRow(r.skill_id, r.canonical_name, r.skill_type) for r in rows]
+    return [SkillRow(str(r.skill_id), r.canonical_name, r.skill_type) for r in rows]
 
 
 async def load_alias_dictionary(session: AsyncSession) -> list[tuple[str, str]]:
@@ -41,7 +56,19 @@ async def load_alias_dictionary(session: AsyncSession) -> list[tuple[str, str]]:
             )
         )
     ).all()
-    return [(r.skill_id, r.term) for r in rows if r.term]
+    return [(str(r.skill_id), r.term) for r in rows if r.term]
+
+
+async def valid_skill_ids(session: AsyncSession, skill_ids: set[str]) -> set[str]:
+    if not skill_ids:
+        return set()
+    rows = (
+        await session.execute(
+            text("SELECT skill_id FROM skill_taxonomy WHERE skill_id = ANY(:ids)"),
+            {"ids": sorted(skill_ids)},
+        )
+    ).all()
+    return {str(r.skill_id) for r in rows}
 
 
 async def match_by_embedding(

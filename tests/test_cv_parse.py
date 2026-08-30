@@ -3,6 +3,7 @@
 spaCy is optional here (nlp=None): text extraction, regex segmentation, skill matching,
 and PII redaction all work without it. ORG detection is covered separately when spaCy is present.
 """
+
 import pymupdf
 import pytest
 
@@ -46,7 +47,7 @@ def test_extracts_text_and_experiences():
     assert exp.title == "Project Coordinator"
 
 
-def test_matches_skills_including_fuzzy():
+def test_typo_is_not_promoted_to_verified_skill():
     cv_text = (
         "Work Experience\n"
         "Manager\n"
@@ -54,12 +55,16 @@ def test_matches_skills_including_fuzzy():
         "Responsible for projct management and budgeting.\n"  # typo: projct
     )
     cv = _extractor().parse(_pdf(cv_text))
-    assert "budgeting" in cv.skill_mentions          # exact
-    assert "project management" in cv.skill_mentions  # fuzzy over the typo
+    assert "budgeting" in cv.skill_mentions  # exact
+    assert "project management" not in cv.skill_mentions
 
 
 def test_pii_is_redacted_from_raw_text():
-    cv = _extractor().parse(_pdf("Contact: jane.doe@example.com +60 12-345 6789\nWork Experience\nRole\n2020 - 2021\nDid things.\n"))
+    cv = _extractor().parse(
+        _pdf(
+            "Contact: jane.doe@example.com +60 12-345 6789\nWork Experience\nRole\n2020 - 2021\nDid things.\n"
+        )
+    )
     assert "jane.doe@example.com" not in cv.raw_text
     assert "[email]" in cv.raw_text
     assert "[phone]" in cv.raw_text

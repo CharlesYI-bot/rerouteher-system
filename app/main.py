@@ -4,6 +4,7 @@ Models and reference-derived assets load once at startup (lifespan) and live on
 app.state so requests have no cold start. Model loading is resilient: if an ML asset
 is missing, the app still boots and the affected endpoint degrades at call time.
 """
+
 import logging
 from contextlib import asynccontextmanager
 
@@ -13,12 +14,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import cv, gap, snapshot
 from app.config import get_settings
 from app.core.logging import RequestLoggingMiddleware, configure_logging
-from app.db import SessionLocal
-from app.repositories import skills as skills_repo
 from app.services.cv_extractor import CVExtractor
 from app.services.embedder import Embedder
 from app.services.gap import GapService
 from app.services.occupation_matcher import EscoTfidfMatcher
+from app.services.skill_catalog import SkillCatalog
 from app.services.snapshot import SnapshotService
 
 configure_logging()
@@ -33,44 +33,44 @@ async def lifespan(app: FastAPI):
     embedder = None
     try:
         embedder = Embedder(settings.embedding_model)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Embedder not loaded (%s); snapshot semantic match disabled", exc)
+    except Exception:  # noqa: BLE001
+        logger.warning("Embedder not loaded; vector role recommendations disabled")
 
-    # 2. ESCO TF-IDF matcher (Tier 1, logged). None if the artifact is absent.
-    tfidf_matcher = EscoTfidfMatcher.load(settings.tfidf_model_path)
+    # 2. Optional ESCO comparison model; never a six-digit MASCO identity lookup.
+    try:
+        tfidf_matcher = EscoTfidfMatcher.load(settings.tfidf_model_path)
+    except Exception:
+        logger.warning("TF-IDF model unavailable; ESCO comparison disabled")
+        tfidf_matcher = None
     if tfidf_matcher is None:
-        logger.warning("TF-IDF matcher not found at %s; Tier 1 occupation logging disabled", settings.tfidf_model_path)
+        logger.warning("ESCO comparison model unavailable")
 
-    # 3. spaCy pipeline + alias dictionary.
+    # 3. spaCy is optional and independent of the database skill dictionary.
     nlp = None
-    alias_pairs: list[tuple[str, str]] = []
     try:
         import spacy
 
         nlp = spacy.load("en_core_web_sm")
-        async with SessionLocal() as session:
-            alias_pairs = await skills_repo.load_alias_dictionary(session)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("spaCy/alias dictionary not loaded (%s); CV parsing degraded", exc)
+    except Exception:  # noqa: BLE001
+        logger.warning("spaCy not loaded; organisation extraction degraded")
 
-    skill_dictionary = sorted({term for _, term in alias_pairs})
+    skill_catalog = SkillCatalog(settings.skill_cache_ttl_seconds)
 
-    # Wire services onto app state. The snapshot service loads its own skill lookup
-    # lazily from the DB on first request and caches it.
-    app.state.cv_extractor = CVExtractor(
-        nlp=nlp, skill_dictionary=skill_dictionary, embedder=embedder
-    )
+    # Parser and snapshot share one TTL-refreshed canonical skill catalog.
+    app.state.cv_extractor = CVExtractor(nlp=nlp, skill_dictionary=[], embedder=embedder)
     app.state.snapshot_service = SnapshotService(
-        settings=settings, embedder=embedder, tfidf_matcher=tfidf_matcher
+        settings=settings,
+        embedder=embedder,
+        tfidf_matcher=tfidf_matcher,
+        skill_catalog=skill_catalog,
     )
     app.state.gap_service = GapService(settings=settings)
 
     logger.info(
-        "startup: embedder=%s tfidf=%s spacy=%s skill_dict=%d",
+        "startup: embedder=%s tfidf=%s spacy=%s",
         embedder is not None,
         tfidf_matcher is not None,
         nlp is not None,
-        len(skill_dictionary),
     )
 
     yield
@@ -78,7 +78,7 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    app = FastAPI(title="ReRouteHer API", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="ReRouteHer API", version="0.2.0", lifespan=lifespan)
 
     # Allow the browser client to call the API directly.
     app.add_middleware(

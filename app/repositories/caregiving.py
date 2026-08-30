@@ -1,4 +1,5 @@
 """Caregiving map queries: break activity -> reframed professional label."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -11,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 class ReframedRow:
     activity_id: str
     reframed_label: str
+    skill_id: str
+    canonical_name: str
 
 
 async def reframe(session: AsyncSession, activities: list[str]) -> list[ReframedRow]:
@@ -20,10 +23,14 @@ async def reframe(session: AsyncSession, activities: list[str]) -> list[Reframed
     rows = (
         await session.execute(
             text(
-                "SELECT DISTINCT activity_id, reframed_label "
-                "FROM caregiving_map WHERE activity_id = ANY(:acts)"
+                "SELECT DISTINCT cm.activity_id, cm.reframed_label, st.skill_id, st.canonical_name "
+                "FROM caregiving_map cm JOIN skill_taxonomy st ON st.skill_id = cm.onet_skill_id "
+                "WHERE cm.activity_id = ANY(:acts) ORDER BY st.skill_id, cm.activity_id"
             ),
             {"acts": activities},
         )
     ).all()
-    return [ReframedRow(r.activity_id, r.reframed_label) for r in rows]
+    return [
+        ReframedRow(r.activity_id, r.reframed_label, str(r.skill_id), r.canonical_name)
+        for r in rows
+    ]

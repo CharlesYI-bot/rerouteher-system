@@ -1,4 +1,5 @@
 """Schemas for POST /api/cv/parse."""
+
 from pydantic import BaseModel
 
 
@@ -14,6 +15,7 @@ class CV(BaseModel):
     raw_text: str
     experiences: list[Experience] = []
     skill_mentions: list[str] = []
+    warnings: list[str] = []
 
 
 class CVParseResponse(BaseModel):
