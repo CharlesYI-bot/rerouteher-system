@@ -78,7 +78,7 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    app = FastAPI(title="ReRouteHer API", version="0.2.0", lifespan=lifespan)
+    app = FastAPI(title="ReRouteHer API", version="0.2.1", lifespan=lifespan)
 
     # Allow the browser client to call the API directly.
     app.add_middleware(

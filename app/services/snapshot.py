@@ -25,6 +25,7 @@ from app.schemas.snapshot import (
 )
 from app.services.cv_extractor import occupation_title
 from app.services.occupation_matcher import normalize_text
+from app.services.role_titles import candidate_titles
 from app.services.skill_catalog import SkillCatalog, find_evidence
 
 logger = logging.getLogger("rerouteher")
@@ -130,19 +131,40 @@ class SnapshotService:
             await roles_repo.exact_eligible_title(session, title, prefix=prefix) if title else []
         )
         ranked = [(role, "exact_title") for role in exact]
-        profile = " ".join([title or "", *skill_names]).strip()
-        if profile and self._embedder is not None:
-            query = self._embedder.encode_one(profile)
-            ranked.extend(
-                (role, "embedding")
+        if title and not exact:
+            for variant in candidate_titles(title):
+                ranked.extend(
+                    (role, "title_variant")
+                    for role in await roles_repo.exact_eligible_title(
+                        session, variant, prefix=prefix
+                    )
+                )
+        # A long skills list can dilute the occupational title in the profile
+        # embedding. Retrieve by title as well, without lowering the quality gate.
+        profile = " ".join([title or "", *skill_names[:12]]).strip()
+        queries = list(dict.fromkeys(text for text in (title, profile) if text))
+        vector_candidates = {}
+        if self._embedder is not None:
+            for query_text in queries:
+                query = self._embedder.encode_one(query_text)
                 for role in await roles_repo.nearest_by_embedding(
                     session,
                     query,
                     k=12,
                     prefix=prefix,
                     threshold=self._settings.role_cosine_threshold,
-                )
+                ):
+                    previous_match = vector_candidates.get(role.role_id)
+                    if math.isfinite(role.similarity) and (
+                        previous_match is None or role.similarity > previous_match.similarity
+                    ):
+                        vector_candidates[role.role_id] = role
+        ranked.extend(
+            (role, "embedding")
+            for role in sorted(
+                vector_candidates.values(), key=lambda role: (-role.similarity, role.role_id)
             )
+        )
         recommended = []
         ids, titles, codes = set(), set(), set()
         for role, method in ranked:
@@ -164,7 +186,7 @@ class SnapshotService:
                     role_id=role.role_id,
                     masco_code=role.masco_code,
                     esco_code=role.esco_code,
-                    similarity=round(role.similarity, 3),
+                    similarity=None if method == "title_variant" else round(role.similarity, 3),
                     method=method,
                 )
             )

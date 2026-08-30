@@ -56,8 +56,8 @@ class RecommendedRole(BaseModel):
     role_id: str
     masco_code: str
     esco_code: str | None = None
-    similarity: float
-    method: Literal["exact_title", "embedding"]
+    similarity: float | None = None
+    method: Literal["exact_title", "title_variant", "embedding"]
 
 
 class SnapshotResponse(BaseModel):

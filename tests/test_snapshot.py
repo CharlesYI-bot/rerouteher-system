@@ -239,3 +239,68 @@ async def test_failed_refresh_does_not_serve_expired_claims(monkeypatch):
     )
     with pytest.raises(RuntimeError):
         await cache.get(object())
+
+
+async def test_software_engineer_variant_restores_existing_automatic_suggestion(monkeypatch):
+    async def exact(session, title, **kwargs):
+        if title == "Software Developer":
+            return [NearestRole("M251201", title, 1, "251201", "2512.4")]
+        return []
+
+    monkeypatch.setattr(roles, "exact_eligible_title", exact)
+    response = await SnapshotService(Settings(), None, None).generate(request(), object())
+    assert response.previous_occupation.role == "Software Engineer"
+    assert [r.role_id for r in response.recommended_roles] == ["M251201"]
+    assert response.recommended_roles[0].method == "title_variant"
+    assert response.recommended_roles[0].similarity is None
+
+
+async def test_variant_does_not_reintroduce_pending_or_ambiguous_roles():
+    response = await SnapshotService(Settings(), None, None).generate(request(), object())
+    assert response.recommended_roles == []
+    assert roles.exact_eligible_title.await_args_list[-1].args[1] == "Software Developer"
+
+
+async def test_title_only_retrieval_not_diluted_by_skill_list(monkeypatch):
+    class ProfileEmbedder:
+        def encode_one(self, value):
+            return np.ones(384) if value == "Project Coordinator" else np.zeros(384)
+
+    async def nearest(session, vec, **kwargs):
+        return (
+            [NearestRole("M151122", "IT Project Manager", 0.79, "151122", "1330.7")]
+            if vec.any()
+            else []
+        )
+
+    monkeypatch.setattr(roles, "nearest_by_embedding", nearest)
+    response = await SnapshotService(Settings(), ProfileEmbedder(), None).generate(
+        request("Project Coordinator"), object()
+    )
+    assert response.recommended_roles[0].role_id == "M151122"
+    assert response.recommended_roles[0].similarity == 0.79
+
+
+async def test_best_vector_score_wins_across_title_and_profile(monkeypatch):
+    monkeypatch.setattr(
+        roles,
+        "nearest_by_embedding",
+        AsyncMock(
+            side_effect=[
+                [NearestRole("M251201", "Software Developer", 0.7, "251201", "2512.4")],
+                [NearestRole("M251201", "Software Developer", 0.82, "251201", "2512.4")],
+            ]
+        ),
+    )
+    response = await SnapshotService(Settings(), Embedder(), None).generate(request(), object())
+    assert len(response.recommended_roles) == 1
+    assert response.recommended_roles[0].similarity == 0.82
+
+
+@pytest.mark.parametrize(
+    "title", ["Data Scientist", "Software Engineering Manager", "English Teacher"]
+)
+async def test_variant_rules_do_not_turn_different_jobs_into_developers(title):
+    from app.services.role_titles import candidate_titles
+
+    assert candidate_titles(title) == ()

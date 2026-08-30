@@ -67,9 +67,10 @@ concepts solely because their names are similar.
 POST /api/snapshot/generate accepts the existing request shape.
 
 - Recommendations add role_id, six-digit masco_code, esco_code and method
-  (exact_title or embedding). They can contain fewer than three roles, including none.
+  (exact_title, title_variant or embedding). They can contain fewer than three roles, including none.
 - Similarity is the real cosine score. Exact-title agreement uses 1.0, which is
-  label agreement, not a suitability confidence.
+  label agreement, not a suitability confidence. A title variant has null similarity,
+  because it is a retrieval hint rather than a model confidence or official crosswalk.
 - Previous occupation uses method "cv_title" and confidence null. It is the first
   reliable résumé-stated title in CV order, not independently verified history.
   An out-of-catalog job is not replaced with a STEM recommendation.
@@ -153,7 +154,7 @@ For interactive evaluation:
 1. Install requirements.txt and the spaCy model.
 2. Retrieve repository model assets with Git LFS if your checkout has pointer files.
    Confirm the trusted joblib artifact and vendored embedding model are available.
-   Missing models degrade to exact-title-only recommendations.
+   Missing models degrade to eligible exact titles and explicitly listed title variants.
 3. Copy .env.example to an untracked .env. Point DATABASE_URL at a separate test
    database already containing the approved MASCO 2020 D13 release. Prefer a
    SELECT-only account. Do not run import/reset scripts.
@@ -171,7 +172,7 @@ all required IDs and a one-band profile.
 Tests cover synthetic unit/API cases and actual PostgreSQL/pgvector query execution.
 No personal résumé content or private credentials are committed.
 
-Local validation on 30 August 2026: **95 passed** (74 fast tests plus 21 optional
+Local validation on 30 August 2026: **104 passed** (81 fast tests plus 23 optional
 PostgreSQL/pgvector tests), Ruff passed, Python compilation passed, and git whitespace
 checks passed. Python 3.12 was used. One non-failing Starlette/httpx deprecation
 warning remains. No database SQL, model assets or trained model files were modified.
@@ -186,9 +187,28 @@ Before production the team must still:
   and inherited remote/AI ratings;
 - review extraction recall, negated/ambiguous mentions, unusual titles, chronology
   (currently CV order), and complex PDF layouts;
-- integrate frontend contract changes and stale-state handling;
+- test the paired frontend fix/readiness-gap-rendering branch on staging;
 - verify native PostgreSQL/asyncpg connectivity and Docker/model startup: the
   in-memory harness is not a full deployment test.
 
 Low scores can remain when canonical requirements do not match résumé evidence.
 This branch does not inflate scores or approve missing dataset mappings.
+
+## Blank-readiness follow-up (0.2.1)
+
+The earlier safeguard change allowed an empty recommendation list; the deployed UI
+then skipped gap computation and rendered neither a result nor an explanation.
+An eligible title such as Software Developer worked, while Software Engineer could
+return no candidate because the combined title/skills embedding missed the threshold.
+
+Candidate retrieval now checks a small, explicit list of Software Engineer title
+variants and searches title-only and bounded title-plus-skills embeddings. The same
+approval, six-digit identity and cosine threshold gates remain in force. No general
+scientist-to-analyst equivalence, arbitrary ESCO fallback, or forced filler is added.
+The résumé-stated occupation and separate ESCO comparison remain intact.
+
+Pair with frontend branch **fix/readiness-gap-rendering**, which sends stable IDs,
+handles not-assessed/empty results and invalidates stale requests and cached sessions.
+No role-search API, manual role catalogue, database changes or new product workflow
+are part of this follow-up. Unmatched profiles can still have no recommendation;
+the UI must explain this rather than fabricate a role or score.
